@@ -1,0 +1,27 @@
+{
+  "name": "Company Verification API",
+  "description": "Verify company legitimacy, online presence, and extract company data for AI agents",
+  "version": "1.0.0",
+  "author": "ppsllc4-byte",
+  "category": "business-intelligence",
+  "endpoint": "https://company-verification-api-production.up.railway.app",
+  "pricing": {
+    "model": "pay-per-use",
+    "amount": 0.10,
+    "currency": "USD",
+    "unit": "verification"
+  },
+  "endpoints": {
+    "verify": {
+      "method": "POST",
+      "path": "/verify",
+      "description": "Verify a single company"
+    },
+    "batch": {
+      "method": "POST",
+      "path": "/verify/batch",
+      "description": "Verify multiple companies"
+    }
+  },
+  "tags": ["verification", "company", "due-diligence", "fraud-prevention", "business-intelligence"]
+}
