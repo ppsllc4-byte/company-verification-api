@@ -1,0 +1,11 @@
+{
+  "keys": {
+    "42c7dcfb3c17f2eccf7b5c731e8a3810a7a5b7b0d78f77d5fb0b00e0ca425d66": {
+      "user_email": "test@test.com",
+      "credits_remaining": 90,
+      "created_at": "2026-02-08T13:53:59.776371",
+      "last_used": "2026-02-08T13:56:12.124676",
+      "is_active": true
+    }
+  }
+}

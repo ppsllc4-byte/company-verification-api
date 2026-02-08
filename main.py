@@ -1,25 +1,30 @@
 from fastapi import FastAPI, HTTPException, Header, Request
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, HttpUrl
-from typing import Optional, Dict, Any
-import httpx
+from pydantic import BaseModel, Field, validator
+from typing import Optional, Dict, Any, List
 import os
 from dotenv import load_dotenv
-import re
-from bs4 import BeautifulSoup
-import asyncio
 from datetime import datetime
+import httpx
+from bs4 import BeautifulSoup
+from payment import PaymentProcessor, verify_payment_token
+from api_keys import api_key_manager
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded
 
-# Load environment variables
 load_dotenv()
 
 app = FastAPI(
     title="Company Verification API",
-    description="Verify company legitimacy, extract basic info, and check online presence",
-    version="1.0.0"
+    description="Verify business legitimacy and online presence",
+    version="2.0.0"
 )
 
-# CORS middleware
+limiter = Limiter(key_func=get_remote_address)
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -28,248 +33,273 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Models
-class CompanyVerificationRequest(BaseModel):
-    company_name: str
-    website: Optional[str] = None
+# Input validation models
+class CompanyVerifyRequest(BaseModel):
+    company_name: str = Field(..., min_length=1, max_length=200)
+    website: Optional[str] = Field(None, max_length=500)
     
-class CompanyVerificationResponse(BaseModel):
-    company_name: str
-    verified: bool
-    confidence_score: float  # 0.0 to 1.0
-    website: Optional[str] = None
-    social_media: Dict[str, Optional[str]] = {}
-    online_presence: Dict[str, Any] = {}
-    risk_flags: list[str] = []
-    timestamp: str
+    @validator('website')
+    def validate_website(cls, v):
+        if v and not (v.startswith('http://') or v.startswith('https://')):
+            v = f"https://{v}"
+        return v
 
-# Helper Functions
-async def check_website_exists(url: str) -> tuple[bool, Dict[str, Any]]:
-    """Check if website exists and extract basic info"""
-    try:
-        # Ensure URL has protocol
-        if not url.startswith(('http://', 'https://')):
-            url = f"https://{url}"
-        
-        async with httpx.AsyncClient(timeout=10.0, follow_redirects=True) as client:
-            response = await client.get(url)
-            
-            if response.status_code == 200:
-                soup = BeautifulSoup(response.text, 'html.parser')
-                
-                # Extract basic info
-                title = soup.find('title')
-                meta_description = soup.find('meta', attrs={'name': 'description'})
-                
-                return True, {
-                    'status_code': response.status_code,
-                    'title': title.text.strip() if title else None,
-                    'description': meta_description.get('content') if meta_description else None,
-                    'has_ssl': url.startswith('https://'),
-                }
-            return False, {'status_code': response.status_code}
-    except Exception as e:
-        return False, {'error': str(e)}
+class BatchVerifyRequest(BaseModel):
+    companies: List[CompanyVerifyRequest] = Field(..., max_items=10)
 
-async def search_social_media(company_name: str, domain: Optional[str] = None) -> Dict[str, Optional[str]]:
-    """Search for social media profiles"""
-    social_links = {
-        'linkedin': None,
-        'twitter': None,
-        'facebook': None,
-    }
-    
-    # Basic search patterns (in production, you'd use APIs)
-    search_name = company_name.lower().replace(' ', '')
-    
-    # These are placeholder patterns - in production you'd actually search
-    patterns = {
-        'linkedin': f"linkedin.com/company/{search_name}",
-        'twitter': f"twitter.com/{search_name}",
-        'facebook': f"facebook.com/{search_name}",
-    }
-    
-    # In a real implementation, you'd make actual API calls or web scraping here
-    # For now, we'll return the expected patterns
-    for platform, pattern in patterns.items():
-        social_links[platform] = f"https://{pattern}"
-    
-    return social_links
-
-def calculate_confidence_score(data: Dict[str, Any]) -> float:
-    """Calculate confidence score based on available data"""
-    score = 0.0
-    max_score = 5.0
-    
-    # Website exists (+2.0)
-    if data.get('website_exists'):
-        score += 2.0
-        
-        # Has SSL (+0.5)
-        if data.get('website_info', {}).get('has_ssl'):
-            score += 0.5
-        
-        # Has title and description (+0.5)
-        if data.get('website_info', {}).get('title') and data.get('website_info', {}).get('description'):
-            score += 0.5
-    
-    # Has social media presence (+1.5)
-    social_count = len([v for v in data.get('social_media', {}).values() if v])
-    score += min(social_count * 0.5, 1.5)
-    
-    # Has online mentions (+0.5)
-    if data.get('online_presence', {}).get('has_mentions'):
-        score += 0.5
-    
-    return round(score / max_score, 2)
-
-def identify_risk_flags(data: Dict[str, Any]) -> list[str]:
-    """Identify potential risk flags"""
-    flags = []
-    
-    # No website
-    if not data.get('website_exists'):
-        flags.append("No active website found")
-    
-    # No SSL
-    if data.get('website_exists') and not data.get('website_info', {}).get('has_ssl'):
-        flags.append("Website lacks SSL certificate")
-    
-    # No social media
-    if not any(data.get('social_media', {}).values()):
-        flags.append("No social media presence detected")
-    
-    # Website error
-    if data.get('website_info', {}).get('error'):
-        flags.append(f"Website error: {data['website_info']['error']}")
-    
-    return flags
-
-# API Endpoints
 @app.get("/")
-async def root():
-    """API root endpoint"""
+@limiter.limit("100/minute")
+async def root(request: Request):
     return {
         "message": "Company Verification API",
-        "version": "1.0.0",
+        "version": "2.0.0",
+        "security": "API key authentication + rate limiting enabled",
         "endpoints": {
-            "verify": "/verify",
-            "health": "/health",
-            "docs": "/docs"
+            "verify": "POST /verify",
+            "batch": "POST /verify/batch",
+            "health": "GET /health",
+            "credits": "GET /credits/check",
+            "purchase": "POST /purchase"
         }
     }
 
 @app.get("/health")
-async def health_check():
-    """Health check endpoint"""
+@limiter.limit("100/minute")
+async def health_check(request: Request):
     return {
         "status": "healthy",
-        "timestamp": datetime.utcnow().isoformat()
+        "timestamp": datetime.utcnow().isoformat(),
+        "version": "2.0.0",
+        "security": "enabled"
     }
 
-@app.post("/verify", response_model=CompanyVerificationResponse)
-async def verify_company(
-    request: CompanyVerificationRequest,
-    authorization: Optional[str] = Header(None)
-):
-    """
-    Verify a company's legitimacy and online presence
+async def verify_company_internal(company_name: str, website: Optional[str]) -> Dict[str, Any]:
+    """Internal verification logic"""
+    result = {
+        "company_name": company_name,
+        "website": website,
+        "verification_status": "pending",
+        "confidence_score": 0.0,
+        "checks": {
+            "website_exists": False,
+            "ssl_valid": False,
+            "social_media": {}
+        },
+        "risk_flags": [],
+        "timestamp": datetime.utcnow().isoformat()
+    }
     
-    This endpoint checks:
-    - Website existence and validity
-    - SSL certificate presence
-    - Social media profiles
-    - Basic online presence
-    - Risk flags
-    
-    Returns a confidence score from 0.0 to 1.0
-    """
-    
-    # In production, verify payment/authorization here
-    # For now, we'll allow all requests
+    if not website:
+        result["verification_status"] = "incomplete"
+        result["risk_flags"].append("No website provided")
+        return result
     
     try:
-        verification_data = {}
-        
-        # Check website
-        if request.website:
-            website_exists, website_info = await check_website_exists(request.website)
-            verification_data['website_exists'] = website_exists
-            verification_data['website_info'] = website_info
-        else:
-            # Try to find website by company name
-            # In production, use a search API
-            verification_data['website_exists'] = False
-            verification_data['website_info'] = {}
-        
-        # Search for social media
-        social_media = await search_social_media(request.company_name, request.website)
-        verification_data['social_media'] = social_media
-        
-        # Check for online presence (placeholder)
-        verification_data['online_presence'] = {
-            'has_mentions': True,  # In production, actually search
-            'search_results_count': 0
-        }
-        
-        # Calculate confidence score
-        confidence_score = calculate_confidence_score(verification_data)
-        
-        # Identify risk flags
-        risk_flags = identify_risk_flags(verification_data)
-        
-        # Determine if verified
-        verified = confidence_score >= 0.5 and len(risk_flags) <= 1
-        
-        return CompanyVerificationResponse(
-            company_name=request.company_name,
-            verified=verified,
-            confidence_score=confidence_score,
-            website=request.website if verification_data.get('website_exists') else None,
-            social_media=social_media,
-            online_presence=verification_data.get('online_presence', {}),
-            risk_flags=risk_flags,
-            timestamp=datetime.utcnow().isoformat()
+        async with httpx.AsyncClient(timeout=10.0, follow_redirects=True) as client:
+            response = await client.get(website)
+            
+            if response.status_code == 200:
+                result["checks"]["website_exists"] = True
+                result["confidence_score"] += 0.4
+                
+                if website.startswith('https://'):
+                    result["checks"]["ssl_valid"] = True
+                    result["confidence_score"] += 0.2
+                
+                soup = BeautifulSoup(response.text, 'html.parser')
+                
+                social_links = {
+                    'linkedin': soup.find('a', href=lambda x: x and 'linkedin.com' in x),
+                    'twitter': soup.find('a', href=lambda x: x and ('twitter.com' in x or 'x.com' in x)),
+                    'facebook': soup.find('a', href=lambda x: x and 'facebook.com' in x)
+                }
+                
+                for platform, link in social_links.items():
+                    if link:
+                        result["checks"]["social_media"][platform] = link.get('href')
+                        result["confidence_score"] += 0.1
+                
+                result["verification_status"] = "verified"
+                
+                if result["confidence_score"] < 0.5:
+                    result["risk_flags"].append("Low online presence")
+                if not result["checks"]["ssl_valid"]:
+                    result["risk_flags"].append("No SSL certificate")
+                
+            else:
+                result["risk_flags"].append(f"Website returned status {response.status_code}")
+                
+    except httpx.TimeoutException:
+        result["risk_flags"].append("Website timeout")
+    except Exception as e:
+        result["risk_flags"].append(f"Verification error: {str(e)}")
+    
+    result["confidence_score"] = min(1.0, result["confidence_score"])
+    return result
+
+@app.post("/verify")
+@limiter.limit("60/minute")
+async def verify_company(
+    request: Request,
+    company: CompanyVerifyRequest,
+    authorization: Optional[str] = Header(None)
+):
+    """Verify a single company (10 credits = $0.10)"""
+    
+    is_authorized = await verify_payment_token(authorization, cost_in_credits=10)
+    
+    if not is_authorized:
+        raise HTTPException(
+            status_code=402,
+            detail={
+                "error": "Payment required",
+                "message": "Invalid API key or insufficient credits",
+                "pricing": "$0.10 per verification (10 credits)",
+                "get_credits": "/purchase"
+            }
         )
-        
+    
+    try:
+        result = await verify_company_internal(company.company_name, company.website)
+        return {"status": "success", "data": result}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Verification failed: {str(e)}")
 
 @app.post("/verify/batch")
-async def verify_companies_batch(companies: list[CompanyVerificationRequest]):
-    """Verify multiple companies in one request"""
-    if len(companies) > 10:
-        raise HTTPException(status_code=400, detail="Maximum 10 companies per batch request")
+@limiter.limit("10/minute")
+async def verify_batch(
+    request: Request,
+    batch: BatchVerifyRequest,
+    authorization: Optional[str] = Header(None)
+):
+    """Verify multiple companies (10 credits each, max 10 companies)"""
+    
+    credits_needed = len(batch.companies) * 10
+    is_authorized = await verify_payment_token(authorization, cost_in_credits=credits_needed)
+    
+    if not is_authorized:
+        raise HTTPException(
+            status_code=402,
+            detail={
+                "error": "Payment required",
+                "message": f"Insufficient credits. Need {credits_needed} credits for {len(batch.companies)} companies",
+                "get_credits": "/purchase"
+            }
+        )
     
     results = []
-    for company in companies:
-        try:
-            result = await verify_company(company)
-            results.append(result)
-        except Exception as e:
-            results.append({
-                "company_name": company.company_name,
-                "error": str(e)
-            })
+    for company in batch.companies:
+        result = await verify_company_internal(company.company_name, company.website)
+        results.append(result)
     
-    return {"results": results}
-
-@app.get("/pricing")
-async def get_pricing():
-    """Return pricing information"""
     return {
-        "currency": "USD",
-        "price_per_verification": 0.10,
-        "batch_discount": {
-            "10_plus": 0.09,
-            "100_plus": 0.08,
-            "1000_plus": 0.07
-        },
-        "payment_methods": ["x402", "crypto"],
-        "subscription_available": False
+        "status": "success",
+        "total_verified": len(results),
+        "results": results
     }
 
-# Run with: uvicorn main:app --reload
+@app.get("/credits/check")
+@limiter.limit("100/minute")
+async def check_credits(request: Request, authorization: Optional[str] = Header(None)):
+    """Check remaining credits"""
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Invalid authorization header")
+    
+    api_key = authorization.replace("Bearer ", "").strip()
+    credits = api_key_manager.get_credits(api_key)
+    
+    if credits is None:
+        raise HTTPException(status_code=401, detail="Invalid API key")
+    
+    return {
+        "credits_remaining": credits,
+        "verifications_available": credits // 10,
+        "status": "active" if credits >= 10 else "low_credits"
+    }
+
+@app.post("/admin/create-api-key")
+async def create_api_key(
+    user_email: str,
+    credits: int = 100,
+    admin_secret: str = Header(None, alias="X-Admin-Secret")
+):
+    """Admin: Create API key"""
+    if admin_secret != os.getenv("API_SECRET_KEY"):
+        raise HTTPException(status_code=403, detail="Forbidden")
+    
+    api_key = api_key_manager.create_key(user_email, credits)
+    
+    return {
+        "status": "success",
+        "api_key": api_key,
+        "user_email": user_email,
+        "credits": credits,
+        "verifications": credits // 10,
+        "message": "SAVE THIS KEY! It will not be shown again."
+    }
+
+@app.post("/purchase")
+@limiter.limit("10/minute")
+async def purchase_credits(
+    request: Request,
+    credits: int = 100,
+    email: Optional[str] = None
+):
+    """Purchase verification credits"""
+    if credits < 10 or credits > 10000:
+        raise HTTPException(status_code=400, detail="Credits must be between 10 and 10,000")
+    
+    base_url = os.getenv("BASE_URL", "https://company-verification-api-production.up.railway.app")
+    
+    session = await PaymentProcessor.create_checkout_session(
+        success_url=f"{base_url}/payment/success?session_id={{CHECKOUT_SESSION_ID}}",
+        cancel_url=f"{base_url}/payment/cancel",
+        quantity=credits
+    )
+    
+    return {
+        "checkout_url": session['url'],
+        "session_id": session['session_id'],
+        "total_amount": session['amount_total'],
+        "credits": credits,
+        "verifications": credits // 10
+    }
+
+@app.get("/payment/success")
+async def payment_success(session_id: str):
+    return {
+        "status": "success",
+        "message": "Payment successful! Check your email for your API key.",
+        "session_id": session_id
+    }
+
+@app.get("/payment/cancel")
+async def payment_cancel():
+    return {
+        "status": "cancelled",
+        "message": "Payment cancelled. Try again at /purchase"
+    }
+
+@app.get("/pricing")
+@limiter.limit("100/minute")
+async def get_pricing(request: Request):
+    return {
+        "single_verification": "$0.10 (10 credits)",
+        "batch_verification": "$0.10 per company (10 credits each)",
+        "bulk_pricing": {
+            "100_credits": "$1.00 (10 verifications)",
+            "1000_credits": "$10.00 (100 verifications)",
+            "10000_credits": "$100.00 (1000 verifications)"
+        },
+        "features": [
+            "Website verification",
+            "SSL validation",
+            "Social media detection",
+            "Risk assessment",
+            "Batch processing (up to 10)"
+        ]
+    }
+
 if __name__ == "__main__":
     import uvicorn
     port = int(os.getenv("PORT", 8000))

@@ -21,4 +21,4 @@ ENV/
 Thumbs.db
 
 # Logs
-*.log
+*.logapi_keys_db.json
