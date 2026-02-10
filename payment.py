@@ -32,20 +32,38 @@ class PaymentProcessor:
                 cancel_url=cancel_url,
                 metadata={'credits': quantity}
             )
-            return {'session_id': session.id, 'url': session.url, 'amount_total': session.amount_total / 100 if session.amount_total else 0}
+            return {
+                'session_id': session.id,
+                'url': session.url,
+                'amount_total': session.amount_total / 100 if session.amount_total else 0
+            }
         except stripe.error.StripeError as e:
             raise HTTPException(status_code=400, detail=f"Checkout error: {str(e)}")
+    
+    @staticmethod
+    async def verify_session(session_id: str) -> Dict[str, Any]:
+        """Verify Stripe session and get payment details"""
+        try:
+            session = stripe.checkout.Session.retrieve(session_id)
+            
+            if session.payment_status != 'paid':
+                raise HTTPException(status_code=400, detail="Payment not completed")
+            
+            return {
+                'session_id': session.id,
+                'customer_email': session.customer_details.email if session.customer_details else None,
+                'amount_total': session.amount_total / 100 if session.amount_total else 0,
+                'credits': int(session.metadata.get('credits', 0)),
+                'paid': True
+            }
+        except stripe.error.StripeError as e:
+            raise HTTPException(status_code=400, detail=f"Session verification failed: {str(e)}")
 
 async def verify_payment_token(authorization: Optional[str], cost_in_credits: int = 1) -> bool:
-    print(f"DEBUG Auth: {authorization}")
     if not authorization or not authorization.startswith("Bearer "):
         return False
     api_key = authorization.replace("Bearer ", "").strip()
-    print(f"DEBUG Key: {api_key[:15]}")
     key_data = api_key_manager.validate_key(api_key)
-    print(f"DEBUG Valid: {key_data is not None}")
     if not key_data:
         return False
-    result = api_key_manager.deduct_credits(api_key, cost_in_credits)
-    print(f"DEBUG Deduct: {result}")
-    return result
+    return api_key_manager.deduct_credits(api_key, cost_in_credits)

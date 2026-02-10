@@ -33,7 +33,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Input validation models
 class CompanyVerifyRequest(BaseModel):
     company_name: str = Field(..., min_length=1, max_length=200)
     website: Optional[str] = Field(None, max_length=500)
@@ -74,7 +73,6 @@ async def health_check(request: Request):
     }
 
 async def verify_company_internal(company_name: str, website: Optional[str]) -> Dict[str, Any]:
-    """Internal verification logic"""
     result = {
         "company_name": company_name,
         "website": website,
@@ -125,10 +123,8 @@ async def verify_company_internal(company_name: str, website: Optional[str]) -> 
                     result["risk_flags"].append("Low online presence")
                 if not result["checks"]["ssl_valid"]:
                     result["risk_flags"].append("No SSL certificate")
-                
             else:
                 result["risk_flags"].append(f"Website returned status {response.status_code}")
-                
     except httpx.TimeoutException:
         result["risk_flags"].append("Website timeout")
     except Exception as e:
@@ -144,8 +140,6 @@ async def verify_company(
     company: CompanyVerifyRequest,
     authorization: Optional[str] = Header(None)
 ):
-    """Verify a single company (10 credits = $0.10)"""
-    
     is_authorized = await verify_payment_token(authorization, cost_in_credits=10)
     
     if not is_authorized:
@@ -172,8 +166,6 @@ async def verify_batch(
     batch: BatchVerifyRequest,
     authorization: Optional[str] = Header(None)
 ):
-    """Verify multiple companies (10 credits each, max 10 companies)"""
-    
     credits_needed = len(batch.companies) * 10
     is_authorized = await verify_payment_token(authorization, cost_in_credits=credits_needed)
     
@@ -182,7 +174,7 @@ async def verify_batch(
             status_code=402,
             detail={
                 "error": "Payment required",
-                "message": f"Insufficient credits. Need {credits_needed} credits for {len(batch.companies)} companies",
+                "message": f"Insufficient credits. Need {credits_needed} credits",
                 "get_credits": "/purchase"
             }
         )
@@ -192,25 +184,17 @@ async def verify_batch(
         result = await verify_company_internal(company.company_name, company.website)
         results.append(result)
     
-    return {
-        "status": "success",
-        "total_verified": len(results),
-        "results": results
-    }
+    return {"status": "success", "total_verified": len(results), "results": results}
 
 @app.get("/credits/check")
 @limiter.limit("100/minute")
 async def check_credits(request: Request, authorization: Optional[str] = Header(None)):
-    """Check remaining credits"""
     if not authorization or not authorization.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="Invalid authorization header")
-    
     api_key = authorization.replace("Bearer ", "").strip()
     credits = api_key_manager.get_credits(api_key)
-    
     if credits is None:
         raise HTTPException(status_code=401, detail="Invalid API key")
-    
     return {
         "credits_remaining": credits,
         "verifications_available": credits // 10,
@@ -223,40 +207,29 @@ async def create_api_key(
     credits: int = 100,
     admin_secret: str = Header(None, alias="X-Admin-Secret")
 ):
-    """Admin: Create API key"""
     if admin_secret != os.getenv("API_SECRET_KEY"):
         raise HTTPException(status_code=403, detail="Forbidden")
-    
     api_key = api_key_manager.create_key(user_email, credits)
-    
     return {
         "status": "success",
         "api_key": api_key,
         "user_email": user_email,
         "credits": credits,
         "verifications": credits // 10,
-        "message": "SAVE THIS KEY! It will not be shown again."
+        "message": "SAVE THIS KEY!"
     }
 
 @app.post("/purchase")
 @limiter.limit("10/minute")
-async def purchase_credits(
-    request: Request,
-    credits: int = 100,
-    email: Optional[str] = None
-):
-    """Purchase verification credits"""
+async def purchase_credits(request: Request, credits: int = 100, email: Optional[str] = None):
     if credits < 10 or credits > 10000:
         raise HTTPException(status_code=400, detail="Credits must be between 10 and 10,000")
-    
     base_url = os.getenv("BASE_URL", "https://company-verification-api-production.up.railway.app")
-    
     session = await PaymentProcessor.create_checkout_session(
         success_url=f"{base_url}/payment/success?session_id={{CHECKOUT_SESSION_ID}}",
         cancel_url=f"{base_url}/payment/cancel",
         quantity=credits
     )
-    
     return {
         "checkout_url": session['url'],
         "session_id": session['session_id'],
@@ -267,37 +240,47 @@ async def purchase_credits(
 
 @app.get("/payment/success")
 async def payment_success(session_id: str):
-    return {
-        "status": "success",
-        "message": "Payment successful! Check your email for your API key.",
-        "session_id": session_id
-    }
+    try:
+        payment_info = await PaymentProcessor.verify_session(session_id)
+        user_email = payment_info['customer_email'] or f"user_{session_id[:8]}@stripe.customer"
+        credits = payment_info['credits']
+        api_key = api_key_manager.create_key(user_email, credits)
+        
+        return {
+            "status": "success",
+            "message": "SAVE THIS API KEY! It will not be shown again.",
+            "api_key": api_key,
+            "credits": credits,
+            "verifications_available": credits // 10,
+            "user_email": user_email,
+            "amount_paid": f"${payment_info['amount_total']:.2f}",
+            "instructions": {
+                "step_1": "Copy the api_key above",
+                "step_2": "Use it in Authorization header",
+                "example": f"Authorization: Bearer {api_key}"
+            },
+            "docs": "https://company-verification-api-production.up.railway.app/docs"
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Payment processing failed: {str(e)}")
 
 @app.get("/payment/cancel")
 async def payment_cancel():
-    return {
-        "status": "cancelled",
-        "message": "Payment cancelled. Try again at /purchase"
-    }
+    return {"status": "cancelled", "message": "Payment cancelled"}
 
 @app.get("/pricing")
 @limiter.limit("100/minute")
 async def get_pricing(request: Request):
     return {
         "single_verification": "$0.10 (10 credits)",
-        "batch_verification": "$0.10 per company (10 credits each)",
+        "batch_verification": "$0.10 per company",
         "bulk_pricing": {
-            "100_credits": "$1.00 (10 verifications)",
-            "1000_credits": "$10.00 (100 verifications)",
-            "10000_credits": "$100.00 (1000 verifications)"
-        },
-        "features": [
-            "Website verification",
-            "SSL validation",
-            "Social media detection",
-            "Risk assessment",
-            "Batch processing (up to 10)"
-        ]
+            "100_credits": "$1.00",
+            "1000_credits": "$10.00",
+            "10000_credits": "$100.00"
+        }
     }
 
 if __name__ == "__main__":
