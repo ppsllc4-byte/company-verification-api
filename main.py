@@ -88,13 +88,17 @@ async def x402_discovery(request: Request):
         status_code=402,
         content={
             "version": "1.0.0",
-            "accepts": ["stripe"],
+            "accepts": [
+                {
+                    "method": "stripe",
+                    "url": 
+"https://company-verification-api-production.up.railway.app/purchase"
+                }
+            ],
             "price": {
                 "amount": "0.10",
                 "currency": "USD"
-            },
-            "purchase_url": 
-"https://company-verification-api-production.up.railway.app/purchase"
+            }
         }
     )
 
