@@ -90,23 +90,19 @@ async def x402_discovery(request: Request):
             "version": "1.0.0",
             "accepts": [
                 {
-                    "scheme": "https",
+                    "scheme": "exact",
                     "method": "stripe",
-                    "network": "mainnet",
+                    "network": "ethereum",
                     "maxAmountRequired": "100.00",
-                    "resource": "/purchase",
+                    "resource": 
+"https://company-verification-api-production.up.railway.app/purchase",
                     "description": "Company Verification API Credits",
                     "mimeType": "application/json",
-                    "payTo": 
-"https://company-verification-api-production.up.railway.app/purchase",
+                    "payTo": "stripe",
                     "maxTimeoutSeconds": 300,
-                    "asset": "USD"
+                    "asset": "USDC"
                 }
-            ],
-            "price": {
-                "amount": "0.10",
-                "currency": "USD"
-            }
+            ]
         }
     )
 
