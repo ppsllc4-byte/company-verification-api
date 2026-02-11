@@ -14,7 +14,16 @@ from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
 
 load_dotenv()
+import sentry_sdk
+from sentry_sdk.integrations.fastapi import FastApiIntegration
 
+# Initialize Sentry
+sentry_sdk.init(
+    dsn=os.getenv("SENTRY_DSN"),
+    integrations=[FastApiIntegration()],
+    traces_sample_rate=0.1,
+    environment="production"
+)
 app = FastAPI(
     title="Company Verification API",
     description="Verify business legitimacy and online presence",
