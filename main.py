@@ -82,22 +82,22 @@ async def health_check(request: Request):
         "security": "enabled"
     }
 @app.get("/.well-known/x402")
-async def x402_discovery():
-    """x402 protocol discovery endpoint"""
+async def x402_discovery(request: Request):
+    from fastapi.responses import JSONResponse
     return JSONResponse(
         status_code=402,
         content={
-            "protocol": "x402",
-            "version": "1.0",
-            "payment_required": True,
-            "payment_url": f"{os.getenv('BASE_URL', 
-'https://company-verification-api-production.up.railway.app')}/purchase",
-            "pricing": {
-                "verify": {"amount": 0.10, "currency": "USD", "credits": 
-10}
-            }
+            "version": "1.0.0",
+            "accepts": ["stripe"],
+            "price": {
+                "amount": "0.10",
+                "currency": "USD"
+            },
+            "purchase_url": 
+"https://company-verification-api-production.up.railway.app/purchase"
         }
     )
+
 async def verify_company_internal(company_name: str, website: Optional[str]) -> Dict[str, Any]:
     result = {
         "company_name": company_name,
