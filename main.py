@@ -12,6 +12,7 @@ from api_keys import api_key_manager
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
+from fastapi.responses import JSONResponse
 
 load_dotenv()
 import sentry_sdk
@@ -80,7 +81,23 @@ async def health_check(request: Request):
         "version": "2.0.0",
         "security": "enabled"
     }
-
+@app.get("/.well-known/x402")
+async def x402_discovery():
+    """x402 protocol discovery endpoint"""
+    return JSONResponse(
+        status_code=402,
+        content={
+            "protocol": "x402",
+            "version": "1.0",
+            "payment_required": True,
+            "payment_url": f"{os.getenv('BASE_URL', 
+'https://company-verification-api-production.up.railway.app')}/purchase",
+            "pricing": {
+                "verify": {"amount": 0.10, "currency": "USD", "credits": 
+10}
+            }
+        }
+    )
 async def verify_company_internal(company_name: str, website: Optional[str]) -> Dict[str, Any]:
     result = {
         "company_name": company_name,
